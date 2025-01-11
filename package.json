@@ -3,7 +3,7 @@
   "displayName": "Roo Cline",
   "description": "A fork of Cline, an autonomous coding agent, with some added experimental configuration and automation features.",
   "publisher": "RooVeterinaryInc",
-  "version": "2.2.45",
+  "version": "2.2.46",
   "icon": "assets/icons/rocket.png",
   "galleryBanner": {
     "color": "#617A91",
@@ -178,7 +178,7 @@
     "test:webview": "cd webview-ui && npm run test",
     "test:extension": "vscode-test",
     "prepare": "husky",
-    "publish:marketplace": "vsce publish",
+    "publish:marketplace": "vsce publish && ovsx publish",
     "publish": "npm run build && changeset publish && npm install --package-lock-only",
     "version-packages": "changeset version && npm install --package-lock-only",
     "vscode:prepublish": "npm run package",

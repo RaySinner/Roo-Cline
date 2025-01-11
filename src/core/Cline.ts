@@ -833,15 +833,15 @@ export class Cline {
 		} catch (error) {
 			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
 			if (alwaysApproveResubmit) {
+				const errorMsg = error.message ?? "Unknown error"
 				const requestDelay = requestDelaySeconds || 5
 				// Automatically retry with delay
-				await this.say(
-					"error",
-					`${error.message ?? "Unknown error"} ↺ Retrying in ${requestDelay} seconds...`,
-				)
-				await this.say("api_req_retry_delayed")
-				await delay(requestDelay * 1000)
-				await this.say("api_req_retried")
+				// Show countdown timer in error color
+				for (let i = requestDelay; i > 0; i--) {
+					await this.say("api_req_retry_delayed", `${errorMsg}\n\nRetrying in ${i} seconds...`, undefined, true)
+					await delay(1000)
+				}
+				await this.say("api_req_retry_delayed", `${errorMsg}\n\nRetrying now...`, undefined, false)
 				// delegate generator output from the recursive call
 				yield* this.attemptApiRequest(previousApiReqIndex)
 				return
@@ -2360,22 +2360,30 @@ export class Cline {
 			// 2. ToolResultBlockParam's content/context text arrays if it contains "<feedback>" (see formatToolDeniedFeedback, attemptCompletion, executeCommand, and consecutiveMistakeCount >= 3) or "<answer>" (see askFollowupQuestion), we place all user generated content in these tags so they can effectively be used as markers for when we should parse mentions)
 			Promise.all(
 				userContent.map(async (block) => {
+					const shouldProcessMentions = (text: string) =>
+						text.includes("<task>") || text.includes("<feedback>");
+
 					if (block.type === "text") {
-						return {
-							...block,
-							text: await parseMentions(block.text, cwd, this.urlContentFetcher),
-						}
-					} else if (block.type === "tool_result") {
-						const isUserMessage = (text: string) => text.includes("<feedback>") || text.includes("<answer>")
-						if (typeof block.content === "string" && isUserMessage(block.content)) {
+						if (shouldProcessMentions(block.text)) {
 							return {
 								...block,
-								content: await parseMentions(block.content, cwd, this.urlContentFetcher),
+								text: await parseMentions(block.text, cwd, this.urlContentFetcher),
 							}
+						}
+						return block;
+					} else if (block.type === "tool_result") {
+						if (typeof block.content === "string") {
+							if (shouldProcessMentions(block.content)) {
+								return {
+									...block,
+									content: await parseMentions(block.content, cwd, this.urlContentFetcher),
+								}
+							}
+							return block;
 						} else if (Array.isArray(block.content)) {
 							const parsedContent = await Promise.all(
 								block.content.map(async (contentBlock) => {
-									if (contentBlock.type === "text" && isUserMessage(contentBlock.text)) {
+									if (contentBlock.type === "text" && shouldProcessMentions(contentBlock.text)) {
 										return {
 											...contentBlock,
 											text: await parseMentions(contentBlock.text, cwd, this.urlContentFetcher),
@@ -2389,6 +2397,7 @@ export class Cline {
 								content: parsedContent,
 							}
 						}
+						return block;
 					}
 					return block
 				}),
