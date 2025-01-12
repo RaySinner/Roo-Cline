@@ -27,6 +27,8 @@ import { checkExistKey } from "../../shared/checkExistApiConfig"
 import { enhancePrompt } from "../../utils/enhance-prompt"
 import { getCommitInfo, searchCommits, getWorkingState } from "../../utils/git"
 import { ConfigManager } from "../config/ConfigManager"
+import { Mode } from "../prompts/types"
+import { codeMode } from "../prompts/system"
 
 /*
 https://github.com/microsoft/vscode-webview-ui-toolkit-samples/blob/main/default/weather-webview/src/providers/WeatherViewProvider.ts
@@ -90,6 +92,8 @@ type GlobalStateKey =
 	| "requestDelaySeconds"
 	| "currentApiConfigName"
 	| "listApiConfigMeta"
+	| "mode"
+	| "modeApiConfigs"
 	| "vsCodeLmModelSelector"
 
 export const GlobalFileNames = {
@@ -236,7 +240,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 		this.outputChannel.appendLine("Webview view resolved")
 	}
 
-	async initClineWithTask(task?: string, images?: string[]) {
+	public async initClineWithTask(task?: string, images?: string[]) {
 		await this.clearTask()
 		const {
 			apiConfiguration,
@@ -256,7 +260,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 		)
 	}
 
-	async initClineWithHistoryItem(historyItem: HistoryItem) {
+	public async initClineWithHistoryItem(historyItem: HistoryItem) {
 		await this.clearTask()
 		const {
 			apiConfiguration,
@@ -277,8 +281,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 		)
 	}
 
-	// Send any JSON serializable data to the react app
-	async postMessageToWebview(message: ExtensionMessage) {
+	public async postMessageToWebview(message: ExtensionMessage) {
 		await this.view?.webview.postMessage(message)
 	}
 
@@ -762,6 +765,40 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 						await this.updateGlobalState("terminalOutputLineLimit", message.value)
 						await this.postStateToWebview()
 						break
+					case "mode":
+						const newMode = message.text as Mode
+						await this.updateGlobalState("mode", newMode)
+						
+						// Load the saved API config for the new mode if it exists
+						const savedConfigId = await this.configManager.GetModeConfigId(newMode)
+						const listApiConfig = await this.configManager.ListConfig()
+						
+						// Update listApiConfigMeta first to ensure UI has latest data
+						await this.updateGlobalState("listApiConfigMeta", listApiConfig)
+						
+						// If this mode has a saved config, use it
+						if (savedConfigId) {
+							const config = listApiConfig?.find(c => c.id === savedConfigId)
+							if (config?.name) {
+								const apiConfig = await this.configManager.LoadConfig(config.name)
+								await Promise.all([
+									this.updateGlobalState("currentApiConfigName", config.name),
+									this.updateApiConfiguration(apiConfig)
+								])
+							}
+						} else {
+							// If no saved config for this mode, save current config as default
+							const currentApiConfigName = await this.getGlobalState("currentApiConfigName")
+							if (currentApiConfigName) {
+								const config = listApiConfig?.find(c => c.name === currentApiConfigName)
+								if (config?.id) {
+									await this.configManager.SetModeConfig(newMode, config.id)
+								}
+							}
+						}
+						
+						await this.postStateToWebview()
+						break
 					case "deleteMessage": {
 						const answer = await vscode.window.showInformationMessage(
 							"What would you like to delete?",
@@ -874,16 +911,17 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 						if (message.text && message.apiConfiguration) {
 							try {
 								await this.configManager.SaveConfig(message.text, message.apiConfiguration);
-
 								let listApiConfig = await this.configManager.ListConfig();
+								
+								// Update listApiConfigMeta first to ensure UI has latest data
+								await this.updateGlobalState("listApiConfigMeta", listApiConfig);
 
 								await Promise.all([
 									this.updateApiConfiguration(message.apiConfiguration),
 									this.updateGlobalState("currentApiConfigName", message.text),
-									this.updateGlobalState("listApiConfigMeta", listApiConfig),
 								])
 
-								this.postStateToWebview()
+								await this.postStateToWebview()
 							} catch (error) {
 								console.error("Error create new api configuration:", error)
 								vscode.window.showErrorMessage("Failed to create api configuration")
@@ -893,21 +931,22 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 					case "renameApiConfiguration":
 						if (message.values && message.apiConfiguration) {
 							try {
-
 								const { oldName, newName } = message.values
 
 								await this.configManager.SaveConfig(newName, message.apiConfiguration);
-
 								await this.configManager.DeleteConfig(oldName)
 
 								let listApiConfig = await this.configManager.ListConfig();
+								const config = listApiConfig?.find(c => c.name === newName);
+								
+								// Update listApiConfigMeta first to ensure UI has latest data
+								await this.updateGlobalState("listApiConfigMeta", listApiConfig);
 
 								await Promise.all([
 									this.updateGlobalState("currentApiConfigName", newName),
-									this.updateGlobalState("listApiConfigMeta", listApiConfig),
 								])
 
-								this.postStateToWebview()
+								await this.postStateToWebview()
 							} catch (error) {
 								console.error("Error create new api configuration:", error)
 								vscode.window.showErrorMessage("Failed to create api configuration")
@@ -918,6 +957,11 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 						if (message.text) {
 							try {
 								const apiConfig = await this.configManager.LoadConfig(message.text);
+								const listApiConfig = await this.configManager.ListConfig();
+								const config = listApiConfig?.find(c => c.name === message.text);
+								
+								// Update listApiConfigMeta first to ensure UI has latest data
+								await this.updateGlobalState("listApiConfigMeta", listApiConfig);
 
 								await Promise.all([
 									this.updateGlobalState("currentApiConfigName", message.text),
@@ -933,7 +977,6 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 						break
 					case "deleteApiConfiguration":
 						if (message.text) {
-
 							const answer = await vscode.window.showInformationMessage(
 								"Are you sure you want to delete this configuration profile?",
 								{ modal: true },
@@ -946,21 +989,22 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 
 							try {
 								await this.configManager.DeleteConfig(message.text);
-								let listApiConfig = await this.configManager.ListConfig()
+								const listApiConfig = await this.configManager.ListConfig();
+								
+								// Update listApiConfigMeta first to ensure UI has latest data
+								await this.updateGlobalState("listApiConfigMeta", listApiConfig);
+
+								// If this was the current config, switch to first available
 								let currentApiConfigName = await this.getGlobalState("currentApiConfigName")
-
-								if (message.text === currentApiConfigName) {
-									await this.updateGlobalState("currentApiConfigName", listApiConfig?.[0]?.name)
-									if (listApiConfig?.[0]?.name) {
-										const apiConfig = await this.configManager.LoadConfig(listApiConfig?.[0]?.name);
-
-										await Promise.all([
-											this.updateGlobalState("listApiConfigMeta", listApiConfig),
-											this.updateApiConfiguration(apiConfig),
-										])
-										await this.postStateToWebview()
-									}
+								if (message.text === currentApiConfigName && listApiConfig?.[0]?.name) {
+									const apiConfig = await this.configManager.LoadConfig(listApiConfig[0].name);
+									await Promise.all([
+										this.updateGlobalState("currentApiConfigName", listApiConfig[0].name),
+										this.updateApiConfiguration(apiConfig),
+									])
 								}
+
+								await this.postStateToWebview()
 							} catch (error) {
 								console.error("Error delete api configuration:", error)
 								vscode.window.showErrorMessage("Failed to delete api configuration")
@@ -985,6 +1029,17 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 	}
 
 	private async updateApiConfiguration(apiConfiguration: ApiConfiguration) {
+		// Update mode's default config
+		const { mode } = await this.getState();
+		if (mode) {
+			const currentApiConfigName = await this.getGlobalState("currentApiConfigName");
+			const listApiConfig = await this.configManager.ListConfig();
+			const config = listApiConfig?.find(c => c.name === currentApiConfigName);
+			if (config?.id) {
+				await this.configManager.SetModeConfig(mode, config.id);
+			}
+		}
+
 		const {
 			apiProvider,
 			apiModelId,
@@ -1509,6 +1564,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			requestDelaySeconds,
 			currentApiConfigName,
 			listApiConfigMeta,
+			mode,
 		} = await this.getState()
 
 		const allowedCommands = vscode.workspace
@@ -1531,7 +1587,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 				.sort((a, b) => b.ts - a.ts),
 			soundEnabled: soundEnabled ?? false,
 			diffEnabled: diffEnabled ?? true,
-			shouldShowAnnouncement: lastShownAnnouncementId !== this.latestAnnouncementId,
+			shouldShowAnnouncement: false, // lastShownAnnouncementId !== this.latestAnnouncementId,
 			allowedCommands,
 			soundVolume: soundVolume ?? 0.5,
 			browserViewportSize: browserViewportSize ?? "900x600",
@@ -1545,6 +1601,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			requestDelaySeconds: requestDelaySeconds ?? 5,
 			currentApiConfigName: currentApiConfigName ?? "default",
 			listApiConfigMeta: listApiConfigMeta ?? [],
+			mode: mode ?? codeMode,
 		}
 	}
 
@@ -1654,7 +1711,9 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			requestDelaySeconds,
 			currentApiConfigName,
 			listApiConfigMeta,
-			vsCodeLmModelSelector
+			mode,
+			modeApiConfigs,
+			vsCodeLmModelSelector,
 		] = await Promise.all([
 			this.getGlobalState("apiProvider") as Promise<ApiProvider | undefined>,
 			this.getGlobalState("apiModelId") as Promise<string | undefined>,
@@ -1709,8 +1768,9 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			this.getGlobalState("requestDelaySeconds") as Promise<number | undefined>,
 			this.getGlobalState("currentApiConfigName") as Promise<string | undefined>,
 			this.getGlobalState("listApiConfigMeta") as Promise<ApiConfigMeta[] | undefined>,
+			this.getGlobalState("mode") as Promise<Mode | undefined>,
+			this.getGlobalState("modeApiConfigs") as Promise<Record<Mode, string> | undefined>,
 			this.getGlobalState("vsCodeLmModelSelector") as Promise<vscode.LanguageModelChatSelector | undefined>,
-
 		])
 
 		let apiProvider: ApiProvider
@@ -1778,6 +1838,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			fuzzyMatchThreshold: fuzzyMatchThreshold ?? 1.0,
 			writeDelayMs: writeDelayMs ?? 1000,
 			terminalOutputLineLimit: terminalOutputLineLimit ?? 500,
+			mode: mode ?? codeMode,
 			preferredLanguage: preferredLanguage ?? (() => {
 				// Get VSCode's locale setting
 				const vscodeLang = vscode.env.language;
@@ -1810,6 +1871,7 @@ export class ClineProvider implements vscode.WebviewViewProvider {
 			requestDelaySeconds: requestDelaySeconds ?? 5,
 			currentApiConfigName: currentApiConfigName ?? "default",
 			listApiConfigMeta: listApiConfigMeta ?? [],
+			modeApiConfigs: modeApiConfigs ?? {} as Record<Mode, string>,
 		}
 	}
 

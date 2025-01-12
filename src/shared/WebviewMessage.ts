@@ -62,6 +62,7 @@ export interface WebviewMessage {
 		| "alwaysApproveResubmit"
 		| "requestDelaySeconds"
 		| "setApiConfigPassword"
+		| "mode"
 		| "requestVsCodeLmModels"
 	text?: string
 	disabled?: boolean
